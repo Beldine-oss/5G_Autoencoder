@@ -1,0 +1,8 @@
+# Project runtime dependencies
+tensorflow
+numpy
+scipy
+matplotlib
+
+# Optional (if you prefer the CPU-only TensorFlow build on some systems):
+# tensorflow-cpu
