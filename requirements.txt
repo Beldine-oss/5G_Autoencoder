@@ -3,6 +3,9 @@ tensorflow
 numpy
 scipy
 matplotlib
+torch
+torchvision
+torchaudio
 
 # Optional (if you prefer the CPU-only TensorFlow build on some systems):
 # tensorflow-cpu
