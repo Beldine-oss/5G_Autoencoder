@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import scipy.io as sio
 import numpy as np
 import torch
@@ -83,6 +84,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 print("Starting training...")
 
 epochs = 20
+loss_history = []
 
 for epoch in range(epochs):
 
@@ -100,11 +102,35 @@ for epoch in range(epochs):
 
         total_loss += loss.item()
 
-    print(f"Epoch {epoch+1}/{epochs}  Loss: {total_loss:.6f}")
+    avg_loss = total_loss / len(loader)
+    loss_history.append(avg_loss)
+
+    print(f"Epoch {epoch+1}/{epochs}  Loss: {avg_loss:.6f}")
 
 # -----------------------------
 # Save trained model
 # -----------------------------
+
 torch.save(model.state_dict(), "autoencoder_model.pth")
 
 print("Training complete. Model saved.")
+# -----------------------------
+# Plot Training Loss
+# -----------------------------
+
+import matplotlib.pyplot as plt
+
+plt.figure()
+
+plt.plot(loss_history)
+
+plt.title("Autoencoder Training Loss")
+plt.xlabel("Epoch")
+plt.ylabel("MSE Loss")
+
+plt.show()
+plt.savefig("training_loss.png")
+
+
+print("Training loss graph saved as training_loss.png")
+
