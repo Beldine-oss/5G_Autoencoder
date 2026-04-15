@@ -1,4 +1,7 @@
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 # Simple numpy-based hybrid beamforming (no torch dependency)
 class SimpleHybridBeamformer:
@@ -162,18 +165,6 @@ def train_hybrid_beamformer(epochs=50):
 if __name__ == "__main__":
     train_hybrid_beamformer()
 
-        analog_bf = torch.complex(analog_real, analog_imag)
-        analog_bf = analog_bf.view(-1, self.num_antennas, self.num_rf_chains)
-
-        # Normalize columns (unit norm for each RF chain)
-        analog_bf = analog_bf / torch.norm(analog_bf, dim=1, keepdim=True)
-
-        # Digital beamformer
-        digital_bf = self.digital_bf(torch.randn(compressed_csi.size(0), self.num_rf_chains))
-        digital_bf = torch.nn.functional.normalize(digital_bf, dim=1)
-
-        return analog_bf, digital_bf
-
 
 def calculate_spectral_efficiency(H, analog_bf, digital_bf, noise_power=1e-10):
     """
@@ -188,49 +179,49 @@ def calculate_spectral_efficiency(H, analog_bf, digital_bf, noise_power=1e-10):
     Returns:
     - se: Spectral efficiency in bits/s/Hz
     """
-    batch_size = H.size(0)
+    batch_size = H.shape[0]
 
     # Effective channel: H * analog_bf * digital_bf
-    effective_channel = torch.matmul(H, analog_bf)  # (batch, antennas, rf_chains)
-    effective_channel = torch.matmul(effective_channel, digital_bf)  # (batch, antennas, users)
+    effective_channel = np.matmul(H, analog_bf)  # (batch, antennas, rf_chains)
+    effective_channel = np.matmul(effective_channel, digital_bf)  # (batch, antennas, users)
 
     # Calculate SINR for each user
     se_total = 0
-    for user in range(digital_bf.size(-1)):
+    for user in range(digital_bf.shape[-1]):
         # Signal power for user
-        signal_power = torch.abs(effective_channel[:, :, user]) ** 2
+        signal_power = np.abs(effective_channel[:, :, user]) ** 2
 
         # Interference from other users
-        interference = torch.sum(torch.abs(effective_channel[:, :, :]) ** 2, dim=-1) - signal_power
+        interference = np.sum(np.abs(effective_channel[:, :, :]) ** 2, axis=-1) - signal_power
 
         # SINR
         sinr = signal_power / (interference + noise_power)
 
         # Spectral efficiency
-        se_user = torch.log2(1 + sinr.mean(dim=0))  # Average over batch
+        se_user = np.log2(1 + sinr.mean(axis=0))  # Average over batch
         se_total += se_user
 
-    return se_total / digital_bf.size(-1)  # Average over users
+    return se_total / digital_bf.shape[-1]  # Average over users
 
 
-def train_hybrid_beamformer(autoencoder_path="csi_autoencoder.pth", epochs=100):
+def train_hybrid_beamformer(epochs=50):
     """
     Train the hybrid beamforming network.
     """
-    # Load trained autoencoder
-    input_dim = 32 * 32 * 2 * 64  # Adjust based on your data dimensions
-    encoding_dim = 64
-
-    autoencoder = Autoencoder(input_dim, encoding_dim)
-    autoencoder.load_state_dict(torch.load(autoencoder_path))
-    autoencoder.eval()
+    print("Loading autoencoder...")
+    try:
+        autoencoder = load_autoencoder()
+    except FileNotFoundError:
+        print("Autoencoder model not found. Please run train_autoencoder.py first.")
+        return
 
     # Create hybrid beamformer
     num_antennas = 32
-    num_rf_chains = 8  # Much fewer than antennas
+    num_rf_chains = 8
     num_users = 4
+    encoding_dim = 64
 
-    hybrid_bf = HybridBeamformer(num_antennas, num_rf_chains, num_users, encoding_dim)
+    hybrid_bf = SimpleHybridBeamformer(num_antennas, num_rf_chains, num_users, encoding_dim)
 
     # Load some sample data for training
     try:
@@ -239,36 +230,31 @@ def train_hybrid_beamformer(autoencoder_path="csi_autoencoder.pth", epochs=100):
         H_sample = H[:100]  # First 100 samples
 
         # Prepare data (simplified - in practice need proper preprocessing)
-        H_tensor = torch.from_numpy(H_sample).float()
+        H_real = np.real(H_sample)
+        H_imag = np.imag(H_sample)
+        H_combined = np.concatenate((H_real, H_imag), axis=-1)
+        X = H_combined.reshape(H_sample.shape[0], -1).astype(np.float32)
+        X = (X - np.mean(X, axis=0)) / (np.std(X, axis=0) + 1e-8)
 
-        # Training loop (simplified)
-        optimizer = optim.Adam(hybrid_bf.parameters(), lr=0.001)
-        criterion = nn.MSELoss()
+        # Get compressed CSI
+        compressed = autoencoder.encode(X)
 
+        print("Training hybrid beamformer...")
         for epoch in range(epochs):
-            optimizer.zero_grad()
-
-            # Get compressed CSI
-            with torch.no_grad():
-                compressed = autoencoder.encoder(H_tensor.view(H_tensor.size(0), -1))
-
             # Generate beamformers
-            analog_bf, digital_bf = hybrid_bf(compressed)
+            analog_bf, digital_bf = hybrid_bf.forward(compressed)
 
             # Calculate spectral efficiency as reward
-            se = calculate_spectral_efficiency(H_tensor, analog_bf, digital_bf)
+            se = calculate_spectral_efficiency(H_sample, analog_bf, digital_bf)
 
-            # For training, we want to maximize SE (minimize negative SE)
-            loss = -se
-
-            loss.backward()
-            optimizer.step()
-
+            # Simple training feedback (in practice, you'd optimize for SE)
             if epoch % 10 == 0:
-                print(f"Epoch {epoch}, Spectral Efficiency: {se.item():.2f} bits/s/Hz")
+                print(f"Epoch {epoch}, Spectral Efficiency: {se:.2f} bits/s/Hz")
 
         # Save model
-        torch.save(hybrid_bf.state_dict(), "hybrid_beamformer.pth")
+        np.savez("hybrid_beamformer.npz",
+                 W1=hybrid_bf.W1, b1=hybrid_bf.b1,
+                 W2=hybrid_bf.W2, b2=hybrid_bf.b2)
         print("Hybrid beamformer trained and saved!")
 
     except FileNotFoundError:
