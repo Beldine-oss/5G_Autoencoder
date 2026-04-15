@@ -5,45 +5,36 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-# -----------------------------
-# Load dataset
-# -----------------------------
-print("Loading dataset...")
 
-data = sio.loadmat('CSI_dataset.mat')
-H = data['H_dataset']
+# ==================================================
+# DATA LOADING (SAFE FUNCTION)
+# ==================================================
+def load_dataset():
 
-print("Original shape:", H.shape)
+    print("Loading dataset...")
 
-# -----------------------------
-# Fix dataset dimensions
-# (samples, antennas)
-# -----------------------------
-H = H.transpose(2,0,1)
-print("Transposed shape:", H.shape)
+    data = sio.loadmat('CSI_dataset.mat')
+    H = data['H_dataset']
 
-# -----------------------------
-# Flatten CSI matrices
-# -----------------------------
-X = H.reshape(H.shape[0], -1)
-print("Flattened shape:", X.shape)
+    print("Original shape:", H.shape)
 
-# -----------------------------
-# Normalize data
-# -----------------------------
-X = X / np.max(np.abs(X))
+    # Fix dataset dimensions
+    H = H.transpose(2, 0, 1)
+    print("Transposed shape:", H.shape)
 
-# -----------------------------
-# Convert to PyTorch tensor
-# -----------------------------
-X_tensor = torch.tensor(X, dtype=torch.float32)
+    # Flatten CSI matrices
+    X = H.reshape(H.shape[0], -1)
+    print("Flattened shape:", X.shape)
 
-dataset = TensorDataset(X_tensor, X_tensor)
-loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    # Normalize data
+    X = X / np.max(np.abs(X))
 
-# -----------------------------
-# Define Autoencoder
-# -----------------------------
+    return X
+
+
+# ==================================================
+# AUTOENCODER MODEL (UNCHANGED ARCHITECTURE)
+# ==================================================
 class Autoencoder(nn.Module):
 
     def __init__(self):
@@ -58,79 +49,86 @@ class Autoencoder(nn.Module):
         )
 
         self.decoder = nn.Sequential(
-            nn.Linear(32,128),
+            nn.Linear(32, 128),
             nn.ReLU(),
-            nn.Linear(128,512),
+            nn.Linear(128, 512),
             nn.ReLU(),
-            nn.Linear(512,1024)
+            nn.Linear(512, 1024)
         )
 
     def forward(self, x):
-
         encoded = self.encoder(x)
         decoded = self.decoder(encoded)
-
         return decoded
 
 
-model = Autoencoder()
+# ==================================================
+# TRAINING FUNCTION (IMPORTANT FIX)
+# ==================================================
+def train_model():
 
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    X = load_dataset()
 
-# -----------------------------
-# Training loop
-# -----------------------------
-print("Starting training...")
+    X_tensor = torch.tensor(X, dtype=torch.float32)
 
-epochs = 20
-loss_history = []
+    dataset = TensorDataset(X_tensor, X_tensor)
+    loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-for epoch in range(epochs):
+    model = Autoencoder()
 
-    total_loss = 0
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    for batch_x, _ in loader:
+    print("Starting training...")
 
-        output = model(batch_x)
+    epochs = 20
+    loss_history = []
 
-        loss = criterion(output, batch_x)
+    for epoch in range(epochs):
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        total_loss = 0
 
-        total_loss += loss.item()
+        for batch_x, _ in loader:
 
-    avg_loss = total_loss / len(loader)
-    loss_history.append(avg_loss)
+            output = model(batch_x)
+            loss = criterion(output, batch_x)
 
-    print(f"Epoch {epoch+1}/{epochs}  Loss: {avg_loss:.6f}")
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-# -----------------------------
-# Save trained model
-# -----------------------------
+            total_loss += loss.item()
 
-torch.save(model.state_dict(), "autoencoder_model.pth")
+        avg_loss = total_loss / len(loader)
+        loss_history.append(avg_loss)
 
-print("Training complete. Model saved.")
-# -----------------------------
-# Plot Training Loss
-# -----------------------------
+        print(f"Epoch {epoch+1}/{epochs}  Loss: {avg_loss:.6f}")
 
-import matplotlib.pyplot as plt
+    # Save model
+    torch.save(model.state_dict(), "autoencoder_model.pth")
+    print("Training complete. Model saved.")
 
-plt.figure()
+    # ==================================================
+    # PLOTTING (FIXED ORDER)
+    # ==================================================
+    plt.figure()
+    plt.plot(loss_history)
 
-plt.plot(loss_history)
+    plt.title("Autoencoder Training Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
 
-plt.title("Autoencoder Training Loss")
-plt.xlabel("Epoch")
-plt.ylabel("MSE Loss")
+    # SAVE FIRST (important)
+    plt.savefig("training_loss.png")
 
-plt.show()
-plt.savefig("training_loss.png")
+    # SHOW OPTIONAL
+    plt.show()
+
+    print("Training loss graph saved as training_loss.png")
 
 
-print("Training loss graph saved as training_loss.png")
-
+# ==================================================
+# SAFE ENTRY POINT (CRITICAL FIX)
+# ==================================================
+if __name__ == "__main__":
+    train_model()
