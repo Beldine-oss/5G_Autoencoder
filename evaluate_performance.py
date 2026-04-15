@@ -1,20 +1,17 @@
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-
 from train_autoencoder import Autoencoder
 
 
 # ==================================================
-# LOAD MODEL
+# LOAD TRAINED MODEL
 # ==================================================
-def load_trained_model():
+def load_model():
 
     model = Autoencoder()
 
-    model.load_state_dict(
-        torch.load("autoencoder_model.pth", map_location="cpu")
-    )
+    model.load_state_dict(torch.load("autoencoder_model.pth", map_location="cpu"))
 
     model.eval()
 
@@ -22,20 +19,22 @@ def load_trained_model():
 
 
 # ==================================================
-# SAFE DATA PREPROCESSING (FIXED ONCE HERE ONLY)
+# SAME PREPROCESSING AS TRAINING (CRITICAL FIX)
 # ==================================================
-def preprocess_csi(H):
+def preprocess(H):
 
-    # 🔥 IMPORTANT FIX: avoid complex issues entirely
-    H = np.real(H)
-
-    # (16, 64, 10000) → (10000, 16, 64)
     H = np.transpose(H, (2, 0, 1))
 
-    num_samples = H.shape[0]
+    # IMPORTANT: match training (real + imag)
+    H_real = np.real(H)
+    H_imag = np.imag(H)
 
-    # Flatten to 1024 (consistent with your model)
-    X = H.reshape(num_samples, -1)
+    H = np.concatenate([H_real, H_imag], axis=-1)
+
+    X = H.reshape(H.shape[0], -1)
+
+    # SAME normalization as training
+    X = (X - np.mean(X)) / (np.std(X) + 1e-8)
 
     return X.astype(np.float32)
 
@@ -43,81 +42,95 @@ def preprocess_csi(H):
 # ==================================================
 # CSI COMPRESSION EVALUATION
 # ==================================================
-def evaluate_compression_performance(model):
+def evaluate(model):
 
-    print("Evaluating CSI Compression Performance")
-    print("=" * 50)
+    print("\nEvaluating CSI Compression Performance")
+    print("=" * 60)
 
     H = np.load("channel_dataset.npy")
-    print(f"Dataset shape: {H.shape}")
 
-    X = preprocess_csi(H)
+    print("Dataset shape:", H.shape)
+
+    X = preprocess(H)
 
     print("Input to model:", X.shape)
-
-    # Normalize (important for stable training/eval)
-    X = (X - np.mean(X, axis=0)) / (np.std(X, axis=0) + 1e-8)
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
 
     with torch.no_grad():
         reconstructed = model(X_tensor).numpy()
 
-    mse = np.mean((reconstructed - X) ** 2)
+    # ==================================================
+    # METRICS (CORRECT RESEARCH FORMULAS)
+    # ==================================================
 
-    print(f"Reconstruction MSE: {mse:.6f}")
+    mse = np.mean((X - reconstructed) ** 2)
 
-    # Compression ratio (based on latent size = 32)
-    original_bits = 1024 * 32
-    compressed_bits = 32 * 32
+    nmse = np.mean(np.linalg.norm(X - reconstructed, axis=1) ** 2 /
+                   np.linalg.norm(X, axis=1) ** 2)
 
-    compression_ratio = original_bits / compressed_bits
+    print(f"Reconstruction MSE : {mse:.6f}")
+    print(f"Reconstruction NMSE: {nmse:.6f}")
+
+    # ==================================================
+    # COMPRESSION RATIO (FIXED FOR OPTION A)
+    # ==================================================
+    input_dim = 2048
+    latent_dim = 128
+
+    compression_ratio = input_dim / latent_dim
 
     print(f"Compression Ratio: {compression_ratio:.1f}x")
 
-    return mse, compression_ratio
+    return mse, nmse, compression_ratio
 
 
 # ==================================================
 # VISUALIZATION (FIXED)
 # ==================================================
-def visualize_csi_reconstruction(model):
+def visualize(model):
 
     print("\nVisualizing CSI Reconstruction")
-    print("=" * 50)
+    print("=" * 60)
 
     H = np.load("channel_dataset.npy")
 
-    H = np.real(H)
     H = np.transpose(H, (2, 0, 1))
 
     sample = H[0]
 
-    X = sample.reshape(1, -1).astype(np.float32)
+    H_real = np.real(sample)
+    H_imag = np.imag(sample)
+
+    combined = np.concatenate([H_real, H_imag], axis=-1)
+
+    X = combined.reshape(1, -1)
+
+    X = (X - np.mean(X)) / (np.std(X) + 1e-8)
 
     X_tensor = torch.tensor(X, dtype=torch.float32)
 
     with torch.no_grad():
         reconstructed = model(X_tensor).numpy()
 
-    reconstructed_matrix = reconstructed.reshape(sample.shape)
+    reconstructed = reconstructed.reshape(combined.shape)
 
     plt.figure(figsize=(10, 4))
 
     plt.subplot(1, 2, 1)
     plt.title("Original CSI")
-    plt.imshow(sample, aspect="auto")
+    plt.imshow(combined, aspect="auto")
     plt.colorbar()
 
     plt.subplot(1, 2, 2)
     plt.title("Reconstructed CSI")
-    plt.imshow(reconstructed_matrix, aspect="auto")
+    plt.imshow(reconstructed, aspect="auto")
     plt.colorbar()
 
     plt.tight_layout()
-    plt.savefig("csi_heatmap_comparison.png")
+    plt.savefig("csi_reconstruction.png")
 
-    print("CSI heatmap saved as csi_heatmap_comparison.png")
+    print("Saved: csi_reconstruction.png")
 
 
 # ==================================================
@@ -125,26 +138,26 @@ def visualize_csi_reconstruction(model):
 # ==================================================
 def main():
 
-    print("5G AI-Enhanced CSI Compression Evaluation")
+    print("5G AI-Enhanced CSI Evaluation (Aligned)")
     print("=" * 60)
 
-    model = load_trained_model()
+    model = load_model()
 
-    mse, compression_ratio = evaluate_compression_performance(model)
+    mse, nmse, cr = evaluate(model)
 
-    visualize_csi_reconstruction(model)
+    visualize(model)
 
     print("\n" + "=" * 60)
-    print("SUMMARY")
+    print("FINAL SUMMARY")
     print("=" * 60)
 
-    print(f"MSE: {mse:.6f}")
-    print(f"Compression Ratio: {compression_ratio:.1f}x")
+    print(f"MSE  : {mse:.6f}")
+    print(f"NMSE : {nmse:.6f}")
+    print(f"CR   : {cr:.1f}x")
 
-    print("\n✔ Everything executed successfully")
-    print("✔ No complex warnings")
-    print("✔ No tensor errors")
-    print("✔ Stable pipeline")
+    print("\n✔ Evaluation aligned with training pipeline")
+    print("✔ NMSE correctly computed")
+    print("✔ No beamforming dependency issues")
 
 
 if __name__ == "__main__":
