@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 # ==================================================
-# DATA LOADING (SAFE FUNCTION)
+# DATA LOADING (OPTION A FIXED)
 # ==================================================
 def load_dataset():
 
@@ -22,38 +22,63 @@ def load_dataset():
     H = H.transpose(2, 0, 1)
     print("Transposed shape:", H.shape)
 
+    # ==================================================
+    # OPTION A: KEEP REAL + IMAGINARY PARTS
+    # ==================================================
+    H_real = np.real(H)
+    H_imag = np.imag(H)
+
+    H = np.concatenate([H_real, H_imag], axis=-1)
+
+    print("After complex split shape:", H.shape)
+
     # Flatten CSI matrices
     X = H.reshape(H.shape[0], -1)
     print("Flattened shape:", X.shape)
 
-    # Normalize data
-    X = X / np.max(np.abs(X))
+    # ==================================================
+    # STABLE NORMALIZATION (CRITICAL FIX)
+    # ==================================================
+    X = (X - np.mean(X)) / (np.std(X) + 1e-8)
 
     return X
 
 
 # ==================================================
-# AUTOENCODER MODEL (UNCHANGED ARCHITECTURE)
+# AUTOENCODER MODEL (RESEARCH-GRADE)
 # ==================================================
 class Autoencoder(nn.Module):
 
     def __init__(self):
         super(Autoencoder, self).__init__()
 
+        # =====================
+        # ENCODER
+        # =====================
         self.encoder = nn.Sequential(
+            nn.Linear(2048, 1024),
+            nn.BatchNorm1d(1024),
+            nn.ReLU(),
+
             nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Linear(512, 128),
-            nn.ReLU(),
-            nn.Linear(128, 32)
+
+            nn.Linear(512, 128)   # latent space
         )
 
+        # =====================
+        # DECODER
+        # =====================
         self.decoder = nn.Sequential(
-            nn.Linear(32, 128),
-            nn.ReLU(),
             nn.Linear(128, 512),
             nn.ReLU(),
-            nn.Linear(512, 1024)
+
+            nn.Linear(512, 1024),
+            nn.BatchNorm1d(1024),
+            nn.ReLU(),
+
+            nn.Linear(1024, 2048)
         )
 
     def forward(self, x):
@@ -63,7 +88,7 @@ class Autoencoder(nn.Module):
 
 
 # ==================================================
-# TRAINING FUNCTION (IMPORTANT FIX)
+# TRAINING FUNCTION
 # ==================================================
 def train_model():
 
@@ -77,11 +102,15 @@ def train_model():
     model = Autoencoder()
 
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    # ==================================================
+    # STABLE OPTIMIZATION SETTINGS
+    # ==================================================
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0002)
+    epochs = 80
 
     print("Starting training...")
 
-    epochs = 20
     loss_history = []
 
     for epoch in range(epochs):
@@ -95,6 +124,10 @@ def train_model():
 
             optimizer.zero_grad()
             loss.backward()
+
+            # gradient stability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
             optimizer.step()
 
             total_loss += loss.item()
@@ -104,31 +137,30 @@ def train_model():
 
         print(f"Epoch {epoch+1}/{epochs}  Loss: {avg_loss:.6f}")
 
-    # Save model
+    # ==================================================
+    # SAVE MODEL
+    # ==================================================
     torch.save(model.state_dict(), "autoencoder_model.pth")
     print("Training complete. Model saved.")
 
     # ==================================================
-    # PLOTTING (FIXED ORDER)
+    # LOSS PLOT (FIXED)
     # ==================================================
     plt.figure()
     plt.plot(loss_history)
 
-    plt.title("Autoencoder Training Loss")
+    plt.title("Autoencoder Training Loss (Option A)")
     plt.xlabel("Epoch")
     plt.ylabel("MSE Loss")
 
-    # SAVE FIRST (important)
     plt.savefig("training_loss.png")
-
-    # SHOW OPTIONAL
     plt.show()
 
     print("Training loss graph saved as training_loss.png")
 
 
 # ==================================================
-# SAFE ENTRY POINT (CRITICAL FIX)
+# ENTRY POINT
 # ==================================================
 if __name__ == "__main__":
     train_model()
