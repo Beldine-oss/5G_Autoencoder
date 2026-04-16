@@ -1,7 +1,54 @@
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import scipy.io as sio
+
 from train_autoencoder import Autoencoder
+
+
+# ==================================================
+# LOAD DATASET
+# ==================================================
+def load_dataset():
+
+    print("Loading dataset...")
+
+    data = sio.loadmat('CSI_dataset.mat')
+    H = data['H_dataset']
+
+    print("Original shape:", H.shape)
+
+    # Fix dimensions
+    H = H.transpose(2, 0, 1)
+
+    print("Transposed shape:", H.shape)
+
+    # Split real / imaginary
+    H_real = np.real(H)
+    H_imag = np.imag(H)
+
+    # Create 2 channels
+    H = np.stack([H_real, H_imag], axis=1)
+
+    print("CNN input shape:", H.shape)
+
+    # Normalize
+    H = (H - np.mean(H)) / (np.std(H) + 1e-8)
+
+    return H.astype(np.float32)
+
+
+# ==================================================
+# NMSE METRIC
+# ==================================================
+def compute_nmse(original, reconstructed):
+
+    num = np.sum((original - reconstructed) ** 2, axis=(1,2,3))
+    den = np.sum(original ** 2, axis=(1,2,3))
+
+    nmse = np.mean(num / den)
+
+    return nmse
 
 
 # ==================================================
@@ -11,7 +58,9 @@ def load_model():
 
     model = Autoencoder()
 
-    model.load_state_dict(torch.load("autoencoder_model.pth", map_location="cpu"))
+    model.load_state_dict(
+        torch.load("autoencoder_model.pth", map_location="cpu")
+    )
 
     model.eval()
 
@@ -19,116 +68,78 @@ def load_model():
 
 
 # ==================================================
-# SAME PREPROCESSING AS TRAINING (CRITICAL FIX)
+# PERFORMANCE EVALUATION
 # ==================================================
-def preprocess(H):
+def evaluate_performance():
 
-    H = np.transpose(H, (2, 0, 1))
-
-    # IMPORTANT: match training (real + imag)
-    H_real = np.real(H)
-    H_imag = np.imag(H)
-
-    H = np.concatenate([H_real, H_imag], axis=-1)
-
-    X = H.reshape(H.shape[0], -1)
-
-    # SAME normalization as training
-    X = (X - np.mean(X)) / (np.std(X) + 1e-8)
-
-    return X.astype(np.float32)
-
-
-# ==================================================
-# CSI COMPRESSION EVALUATION
-# ==================================================
-def evaluate(model):
-
-    print("\nEvaluating CSI Compression Performance")
+    print("5G AI-Enhanced CSI Compression Evaluation")
     print("=" * 60)
 
-    H = np.load("channel_dataset.npy")
+    H = load_dataset()
 
-    print("Dataset shape:", H.shape)
+    model = load_model()
 
-    X = preprocess(H)
+    X_tensor = torch.tensor(H)
 
-    print("Input to model:", X.shape)
-
-    X_tensor = torch.tensor(X, dtype=torch.float32)
+    print("Input tensor shape:", X_tensor.shape)
 
     with torch.no_grad():
+
         reconstructed = model(X_tensor).numpy()
 
     # ==================================================
-    # METRICS (CORRECT RESEARCH FORMULAS)
+    # METRICS
     # ==================================================
+    mse = np.mean((H - reconstructed) ** 2)
 
-    mse = np.mean((X - reconstructed) ** 2)
+    nmse = compute_nmse(H, reconstructed)
 
-    nmse = np.mean(np.linalg.norm(X - reconstructed, axis=1) ** 2 /
-                   np.linalg.norm(X, axis=1) ** 2)
+    print("\nEvaluation Results")
+    print("=" * 40)
 
-    print(f"Reconstruction MSE : {mse:.6f}")
-    print(f"Reconstruction NMSE: {nmse:.6f}")
+    print(f"MSE  : {mse:.6f}")
+    print(f"NMSE : {nmse:.6f}")
 
-    # ==================================================
-    # COMPRESSION RATIO (FIXED FOR OPTION A)
-    # ==================================================
-    input_dim = 2048
-    latent_dim = 128
+    # Compression ratio
+    original_size = 16 * 64 * 2
+    compressed_size = 128
 
-    compression_ratio = input_dim / latent_dim
+    compression_ratio = original_size / compressed_size
 
-    print(f"Compression Ratio: {compression_ratio:.1f}x")
+    print(f"Compression Ratio : {compression_ratio:.1f}x")
 
-    return mse, nmse, compression_ratio
+    return H, reconstructed
 
 
 # ==================================================
-# VISUALIZATION (FIXED)
+# VISUALIZATION
 # ==================================================
-def visualize(model):
+def visualize_reconstruction(H, reconstructed):
 
-    print("\nVisualizing CSI Reconstruction")
-    print("=" * 60)
+    print("\nVisualizing CSI reconstruction...")
 
-    H = np.load("channel_dataset.npy")
+    sample = 0
 
-    H = np.transpose(H, (2, 0, 1))
+    original = H[sample,0]
+    recon = reconstructed[sample,0]
 
-    sample = H[0]
+    plt.figure(figsize=(10,4))
 
-    H_real = np.real(sample)
-    H_imag = np.imag(sample)
-
-    combined = np.concatenate([H_real, H_imag], axis=-1)
-
-    X = combined.reshape(1, -1)
-
-    X = (X - np.mean(X)) / (np.std(X) + 1e-8)
-
-    X_tensor = torch.tensor(X, dtype=torch.float32)
-
-    with torch.no_grad():
-        reconstructed = model(X_tensor).numpy()
-
-    reconstructed = reconstructed.reshape(combined.shape)
-
-    plt.figure(figsize=(10, 4))
-
-    plt.subplot(1, 2, 1)
-    plt.title("Original CSI")
-    plt.imshow(combined, aspect="auto")
+    plt.subplot(1,2,1)
+    plt.title("Original CSI (Real)")
+    plt.imshow(original, aspect='auto')
     plt.colorbar()
 
-    plt.subplot(1, 2, 2)
-    plt.title("Reconstructed CSI")
-    plt.imshow(reconstructed, aspect="auto")
+    plt.subplot(1,2,2)
+    plt.title("Reconstructed CSI (Real)")
+    plt.imshow(recon, aspect='auto')
     plt.colorbar()
 
     plt.tight_layout()
+
     plt.savefig("csi_reconstruction.png")
+
+    plt.show()
 
     print("Saved: csi_reconstruction.png")
 
@@ -138,27 +149,13 @@ def visualize(model):
 # ==================================================
 def main():
 
-    print("5G AI-Enhanced CSI Evaluation (Aligned)")
-    print("=" * 60)
+    H, reconstructed = evaluate_performance()
 
-    model = load_model()
+    visualize_reconstruction(H, reconstructed)
 
-    mse, nmse, cr = evaluate(model)
-
-    visualize(model)
-
-    print("\n" + "=" * 60)
-    print("FINAL SUMMARY")
-    print("=" * 60)
-
-    print(f"MSE  : {mse:.6f}")
-    print(f"NMSE : {nmse:.6f}")
-    print(f"CR   : {cr:.1f}x")
-
-    print("\n✔ Evaluation aligned with training pipeline")
-    print("✔ NMSE correctly computed")
-    print("✔ No beamforming dependency issues")
+    print("\nEvaluation complete.")
 
 
 if __name__ == "__main__":
+
     main()
