@@ -1,89 +1,87 @@
 import numpy as np
-import torch
 import scipy.io as sio
 import matplotlib.pyplot as plt
+import torch
 
-from train_autoencoder import Autoencoder
+from train_autoencoder import CNNAutoencoder
 
 
 # ============================================================
-# LOAD DATASET (MUST MATCH TRAINING)
+# DEVICE
 # ============================================================
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# ============================================================
+# LOAD MODEL
+# ============================================================
+
+def load_model():
+
+    model = CNNAutoencoder().to(device)
+
+    model.load_state_dict(
+        torch.load(
+            "autoencoder_model.pth",
+            map_location=device
+        )
+    )
+
+    model.eval()
+
+    return model
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
 def load_dataset():
 
-    print("Loading dataset...")
-
     data = sio.loadmat("CSI_dataset.mat")
+
     H = data["H_dataset"]
 
-    print("Original shape:", H.shape)
-
-    # reshape to (samples, antennas, subcarriers)
     H = H.transpose(2,0,1)
 
-    print("Transposed shape:", H.shape)
-
-    # split real and imaginary
     H_real = np.real(H)
     H_imag = np.imag(H)
 
-    H = np.concatenate([H_real, H_imag], axis=2)
+    X = np.stack([H_real, H_imag], axis=1)
 
-    # flatten
-    X = H.reshape(H.shape[0], -1)
+    X_max = np.max(np.abs(X))
 
-    print("Flattened shape:", X.shape)
-
-    # SAME normalization used in training
-    X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
+    X = X / X_max
 
     return X.astype(np.float32)
 
 
 # ============================================================
-# NMSE FUNCTION
-# ============================================================
-def compute_nmse(original, reconstructed):
-
-    numerator = np.sum((original - reconstructed) ** 2, axis=1)
-
-    denominator = np.sum(original ** 2, axis=1) + 1e-8
-
-    nmse = np.mean(numerator / denominator)
-
-    return nmse
-
-
-# ============================================================
 # EVALUATION
 # ============================================================
-def evaluate():
 
-    print("============================================================")
-    print("Evaluating CSI Compression Performance")
-    print("============================================================")
+def evaluate(model):
+
+    print("\nEvaluating CSI Compression Performance")
 
     X = load_dataset()
 
-    model = Autoencoder()
-
-    model.load_state_dict(
-        torch.load("autoencoder_model.pth", map_location="cpu")
-    )
-
-    model.eval()
-
-    X_tensor = torch.tensor(X)
+    X_tensor = torch.tensor(X).to(device)
 
     with torch.no_grad():
 
-        reconstructed = model(X_tensor).numpy()
+        reconstructed = model(X_tensor)
+
+    reconstructed = reconstructed.cpu().numpy()
 
     mse = np.mean((X - reconstructed) ** 2)
 
-    nmse = compute_nmse(X, reconstructed)
+    power = np.mean(X ** 2)
 
-    compression_ratio = 2048 / 128
+    nmse = mse / (power + 1e-9)
+
+    compression_ratio = 2048 / 256
 
     print("\n============================================================")
     print("FINAL SUMMARY")
@@ -99,33 +97,40 @@ def evaluate():
 # ============================================================
 # VISUALIZATION
 # ============================================================
+
 def visualize(X, reconstructed):
 
     print("\nVisualizing CSI Reconstruction")
 
-    sample = 0
+    sample_original = X[0]
+    sample_reconstructed = reconstructed[0]
 
-    # split real/imag
-    real_orig = X[sample][:1024].reshape(16,64)
-    imag_orig = X[sample][1024:].reshape(16,64)
+    original_mag = np.sqrt(
+        sample_original[0]**2 +
+        sample_original[1]**2
+    )
 
-    real_rec = reconstructed[sample][:1024].reshape(16,64)
-    imag_rec = reconstructed[sample][1024:].reshape(16,64)
+    reconstructed_mag = np.sqrt(
+        sample_reconstructed[0]**2 +
+        sample_reconstructed[1]**2
+    )
 
-    # magnitude
-    original_mag = np.sqrt(real_orig**2 + imag_orig**2)
-    reconstructed_mag = np.sqrt(real_rec**2 + imag_rec**2)
-
-    plt.figure(figsize=(10,4))
+    plt.figure(figsize=(12,5))
 
     plt.subplot(1,2,1)
-    plt.title("Original CSI Magnitude")
+
     plt.imshow(original_mag, aspect='auto')
+
+    plt.title("Original CSI Magnitude")
+
     plt.colorbar()
 
     plt.subplot(1,2,2)
-    plt.title("Reconstructed CSI Magnitude")
+
     plt.imshow(reconstructed_mag, aspect='auto')
+
+    plt.title("Reconstructed CSI Magnitude")
+
     plt.colorbar()
 
     plt.tight_layout()
@@ -140,13 +145,15 @@ def visualize(X, reconstructed):
 # ============================================================
 # MAIN
 # ============================================================
+
 def main():
 
-    X, reconstructed = evaluate()
+    model = load_model()
+
+    X, reconstructed = evaluate(model)
 
     visualize(X, reconstructed)
 
 
 if __name__ == "__main__":
-
     main()
