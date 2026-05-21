@@ -3,194 +3,139 @@ import scipy.io as sio
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
 from torch.utils.data import DataLoader, TensorDataset
 
 
 # ============================================================
-# DEVICE
+# DEVICE CONFIGURATION
 # ============================================================
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("Using device:", device)
 
 
 # ============================================================
-# LOAD DATASET
+# DATA LOADING AND PREPROCESSING
 # ============================================================
-
 def load_dataset():
 
     print("Loading dataset...")
 
     data = sio.loadmat("CSI_dataset.mat")
-
     H = data["H_dataset"]
 
     print("Original shape:", H.shape)
 
-    # (16,64,10000) -> (10000,16,64)
-    H = H.transpose(2,0,1)
+    # --------------------------------------------------------
+    # TRANSPOSE
+    # Original: (16, 64, 10000)
+    # New:      (10000, 16, 64)
+    # --------------------------------------------------------
+    H = H.transpose(2, 0, 1)
 
     print("Transposed shape:", H.shape)
 
-    # Separate real and imaginary
+    # --------------------------------------------------------
+    # SEPARATE REAL AND IMAGINARY PARTS
+    # --------------------------------------------------------
     H_real = np.real(H)
     H_imag = np.imag(H)
 
-    # Shape -> (samples,2,16,64)
+    # --------------------------------------------------------
+    # STACK AS CHANNELS
+    # Shape:
+    # (samples, 2, 16, 64)
+    # --------------------------------------------------------
     X = np.stack([H_real, H_imag], axis=1)
 
-    print("CNN input shape:", X.shape)
+    print("CNN Input shape:", X.shape)
 
-    # Global scaling
+    # --------------------------------------------------------
+    # GLOBAL MAX NORMALIZATION
+    # --------------------------------------------------------
     X_max = np.max(np.abs(X))
 
     X = X / X_max
+
+    print("Normalization complete.")
 
     return X.astype(np.float32)
 
 
 # ============================================================
-# RESIDUAL BLOCK
+# CONVOLUTIONAL CSI AUTOENCODER
 # ============================================================
-
-class ResidualBlock(nn.Module):
-
-    def __init__(self, channels):
-
-        super(ResidualBlock, self).__init__()
-
-        self.block = nn.Sequential(
-
-            nn.Conv2d(
-                channels,
-                channels,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.BatchNorm2d(channels),
-
-            nn.LeakyReLU(0.3),
-
-            nn.Conv2d(
-                channels,
-                channels,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.BatchNorm2d(channels)
-        )
-
-        self.activation = nn.LeakyReLU(0.3)
-
-    def forward(self, x):
-
-        residual = x
-
-        out = self.block(x)
-
-        out = out + residual
-
-        out = self.activation(out)
-
-        return out
-
-
-# ============================================================
-# CNN AUTOENCODER
-# ============================================================
-
-class CNNAutoencoder(nn.Module):
+class ConvolutionalCsiAutoencoder(nn.Module):
 
     def __init__(self):
 
-        super(CNNAutoencoder, self).__init__()
+        super(ConvolutionalCsiAutoencoder, self).__init__()
 
         # ====================================================
         # ENCODER
         # ====================================================
+        self.encoder_conv = nn.Sequential(
 
-        self.encoder = nn.Sequential(
+            nn.Conv2d(
+                in_channels=2,
+                out_channels=8,
+                kernel_size=3,
+                padding=1
+            ),
 
-            nn.Conv2d(2, 16, kernel_size=3, padding=1),
-
-            nn.BatchNorm2d(16),
-
-            nn.LeakyReLU(0.3),
-
-            ResidualBlock(16),
-
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-
-            nn.BatchNorm2d(32),
+            nn.BatchNorm2d(8),
 
             nn.LeakyReLU(0.3),
 
-            ResidualBlock(32),
+            nn.Conv2d(
+                in_channels=8,
+                out_channels=4,
+                kernel_size=3,
+                padding=1
+            ),
 
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(4),
 
-            nn.BatchNorm2d(64),
-
-            nn.LeakyReLU(0.3),
-
-            ResidualBlock(64)
+            nn.LeakyReLU(0.3)
         )
 
         # ====================================================
-        # BOTTLENECK
+        # FLATTEN + BOTTLENECK
         # ====================================================
+
+        # 4 × 16 × 64 = 4096
 
         self.flatten = nn.Flatten()
 
-        self.fc1 = nn.Linear(64 * 4 * 16, 256)
-
-        self.fc2 = nn.Linear(256, 64 * 4 * 16)
+        # ----------------------------------------------------
+        # 512 latent neurons = 8x compression
+        # ----------------------------------------------------
+        self.encoder_fc = nn.Linear(4096, 512)
 
         # ====================================================
-        # DECODER
+        # DECODER FC
         # ====================================================
+        self.decoder_fc = nn.Linear(512, 4096)
 
-        self.decoder = nn.Sequential(
-
-            ResidualBlock(64),
+        # ====================================================
+        # DECODER CONV
+        # ====================================================
+        self.decoder_conv = nn.Sequential(
 
             nn.ConvTranspose2d(
-                64,
-                32,
-                kernel_size=4,
-                stride=2,
+                in_channels=4,
+                out_channels=8,
+                kernel_size=3,
                 padding=1
             ),
 
-            nn.BatchNorm2d(32),
+            nn.BatchNorm2d(8),
 
             nn.LeakyReLU(0.3),
-
-            ResidualBlock(32),
 
             nn.ConvTranspose2d(
-                32,
-                16,
-                kernel_size=4,
-                stride=2,
-                padding=1
-            ),
-
-            nn.BatchNorm2d(16),
-
-            nn.LeakyReLU(0.3),
-
-            ResidualBlock(16),
-
-            nn.Conv2d(
-                16,
-                2,
+                in_channels=8,
+                out_channels=2,
                 kernel_size=3,
                 padding=1
             ),
@@ -198,53 +143,35 @@ class CNNAutoencoder(nn.Module):
             nn.Tanh()
         )
 
+    # ========================================================
+    # FORWARD PASS
+    # ========================================================
     def forward(self, x):
 
-        x = self.encoder(x)
+        # ----------------------------------------------------
+        # ENCODER
+        # ----------------------------------------------------
+        x = self.encoder_conv(x)
 
         x = self.flatten(x)
 
-        encoded = self.fc1(x)
+        latent = self.encoder_fc(x)
 
-        x = self.fc2(encoded)
+        # ----------------------------------------------------
+        # DECODER
+        # ----------------------------------------------------
+        x = self.decoder_fc(latent)
 
-        x = x.view(-1, 64, 4, 16)
+        x = x.view(-1, 4, 16, 64)
 
-        decoded = self.decoder(x)
+        x = self.decoder_conv(x)
 
-        return decoded
-
-
-# ============================================================
-# HYBRID LOSS
-# ============================================================
-
-def hybrid_loss(output, target):
-
-    # Standard MSE
-    mse = F.mse_loss(output, target)
-
-    # Flatten
-    output_flat = output.view(output.size(0), -1)
-    target_flat = target.view(target.size(0), -1)
-
-    # Cosine similarity
-    cosine = 1 - F.cosine_similarity(
-        output_flat,
-        target_flat,
-        dim=1
-    ).mean()
-
-    # Combined loss
-    loss = mse + 0.2 * cosine
-
-    return loss
+        return x
 
 
 # ============================================================
-# NMSE
+# NMSE FUNCTION
 # ============================================================
-
 def calculate_nmse(actual, predicted):
 
     mse = torch.sum((actual - predicted) ** 2)
@@ -257,11 +184,13 @@ def calculate_nmse(actual, predicted):
 
 
 # ============================================================
-# TRAINING
+# TRAINING FUNCTION
 # ============================================================
-
 def train_model():
 
+    # --------------------------------------------------------
+    # LOAD DATA
+    # --------------------------------------------------------
     X = load_dataset()
 
     X_tensor = torch.tensor(X)
@@ -274,13 +203,28 @@ def train_model():
         shuffle=True
     )
 
-    model = CNNAutoencoder().to(device)
+    # --------------------------------------------------------
+    # MODEL
+    # --------------------------------------------------------
+    model = ConvolutionalCsiAutoencoder().to(device)
 
+    # --------------------------------------------------------
+    # LOSS FUNCTION
+    # --------------------------------------------------------
+    criterion = nn.MSELoss()
+
+    # --------------------------------------------------------
+    # OPTIMIZER
+    # --------------------------------------------------------
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=1e-4
+        lr=1e-4,
+        weight_decay=1e-6
     )
 
+    # --------------------------------------------------------
+    # LEARNING RATE SCHEDULER
+    # --------------------------------------------------------
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
@@ -288,30 +232,44 @@ def train_model():
         patience=10
     )
 
-    epochs = 250
+    # --------------------------------------------------------
+    # TRAINING LOOP
+    # --------------------------------------------------------
+    print("\nStarting training...\n")
+
+    epochs = 200
 
     loss_history = []
-    nmse_history = []
 
-    print("\nStarting training...\n")
+    nmse_history = []
 
     for epoch in range(epochs):
 
         model.train()
 
         total_loss = 0
+
         total_nmse = 0
 
         for batch_x, _ in loader:
 
             batch_x = batch_x.to(device)
 
+            # ------------------------------------------------
+            # FORWARD
+            # ------------------------------------------------
             output = model(batch_x)
 
-            loss = hybrid_loss(output, batch_x)
+            # ------------------------------------------------
+            # LOSS
+            # ------------------------------------------------
+            loss = criterion(output, batch_x)
 
             nmse = calculate_nmse(batch_x, output)
 
+            # ------------------------------------------------
+            # BACKPROP
+            # ------------------------------------------------
             optimizer.zero_grad()
 
             loss.backward()
@@ -319,16 +277,28 @@ def train_model():
             optimizer.step()
 
             total_loss += loss.item()
+
             total_nmse += nmse.item()
 
+        # ----------------------------------------------------
+        # AVERAGES
+        # ----------------------------------------------------
         avg_loss = total_loss / len(loader)
+
         avg_nmse = total_nmse / len(loader)
 
-        scheduler.step(avg_loss)
-
         loss_history.append(avg_loss)
+
         nmse_history.append(avg_nmse)
 
+        # ----------------------------------------------------
+        # UPDATE LR
+        # ----------------------------------------------------
+        scheduler.step(avg_loss)
+
+        # ----------------------------------------------------
+        # PRINT METRICS
+        # ----------------------------------------------------
         print(
             f"Epoch {epoch+1}/{epochs} | "
             f"Loss: {avg_loss:.6f} | "
@@ -338,43 +308,58 @@ def train_model():
     # ========================================================
     # SAVE MODEL
     # ========================================================
-
     torch.save(
         model.state_dict(),
-        "autoencoder_model.pth"
+        "cnn_autoencoder_model.pth"
     )
 
     print("\nTraining complete.")
+    print("Model saved as cnn_autoencoder_model.pth")
 
     # ========================================================
-    # PLOT
+    # PLOT TRAINING LOSS
     # ========================================================
+    plt.figure(figsize=(10, 5))
 
-    plt.figure(figsize=(10,5))
+    plt.plot(loss_history)
 
-    plt.plot(loss_history, label="Loss")
-    plt.plot(nmse_history, label="NMSE")
+    plt.title("CNN Autoencoder Training Loss")
 
     plt.xlabel("Epoch")
 
-    plt.ylabel("Value")
-
-    plt.title("Training Performance")
-
-    plt.legend()
+    plt.ylabel("MSE Loss")
 
     plt.grid(True)
 
-    plt.savefig("training_performance.png")
+    plt.savefig("cnn_training_loss.png")
 
     plt.show()
 
-    print("Saved: training_performance.png")
+    # ========================================================
+    # PLOT NMSE
+    # ========================================================
+    plt.figure(figsize=(10, 5))
+
+    plt.plot(nmse_history)
+
+    plt.title("CNN Autoencoder NMSE")
+
+    plt.xlabel("Epoch")
+
+    plt.ylabel("NMSE")
+
+    plt.grid(True)
+
+    plt.savefig("cnn_nmse_curve.png")
+
+    plt.show()
+
+    print("Training plots saved.")
 
 
 # ============================================================
-# MAIN
+# MAIN ENTRY
 # ============================================================
-
 if __name__ == "__main__":
+
     train_model()
