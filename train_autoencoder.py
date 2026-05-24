@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 # ============================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+print("CUDA Available:", torch.cuda.is_available())
 print("Using device:", device)
 
 # ============================================================
@@ -39,8 +40,7 @@ def load_dataset():
 
     # --------------------------------------------------------
     # STACK CHANNELS
-    # Shape:
-    # (10000,2,16,64)
+    # Shape: (10000,2,16,64)
     # --------------------------------------------------------
     X = np.stack([H_real, H_imag], axis=1)
 
@@ -67,28 +67,23 @@ class ResidualBlock(nn.Module):
 
         super(ResidualBlock, self).__init__()
 
-        self.block = nn.Sequential(
-
-            nn.Conv2d(
-                channels,
-                channels,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.BatchNorm2d(channels),
-
-            nn.LeakyReLU(0.3),
-
-            nn.Conv2d(
-                channels,
-                channels,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.BatchNorm2d(channels)
+        self.conv1 = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=3,
+            padding=1
         )
+
+        self.bn1 = nn.BatchNorm2d(channels)
+
+        self.conv2 = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size=3,
+            padding=1
+        )
+
+        self.bn2 = nn.BatchNorm2d(channels)
 
         self.activation = nn.LeakyReLU(0.3)
 
@@ -96,7 +91,15 @@ class ResidualBlock(nn.Module):
 
         residual = x
 
-        out = self.block(x)
+        out = self.conv1(x)
+
+        out = self.bn1(out)
+
+        out = self.activation(out)
+
+        out = self.conv2(out)
+
+        out = self.bn2(out)
 
         out = out + residual
 
@@ -106,7 +109,7 @@ class ResidualBlock(nn.Module):
 
 
 # ============================================================
-# RESIDUAL CNN AUTOENCODER
+# LIGHTWEIGHT RESIDUAL CNN AUTOENCODER
 # ============================================================
 class ResidualCsiAutoencoder(nn.Module):
 
@@ -120,35 +123,48 @@ class ResidualCsiAutoencoder(nn.Module):
 
         self.encoder = nn.Sequential(
 
-            nn.Conv2d(2, 16, kernel_size=3, padding=1),
+            # INPUT: (2,16,64)
 
-            nn.BatchNorm2d(16),
+            nn.Conv2d(
+                in_channels=2,
+                out_channels=4,
+                kernel_size=3,
+                padding=1
+            ),
+
+            nn.BatchNorm2d(4),
 
             nn.LeakyReLU(0.3),
 
-            ResidualBlock(16),
+            ResidualBlock(4),
 
             # 16x64 -> 8x32
             nn.MaxPool2d(2),
 
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.Conv2d(
+                in_channels=4,
+                out_channels=8,
+                kernel_size=3,
+                padding=1
+            ),
 
-            nn.BatchNorm2d(32),
+            nn.BatchNorm2d(8),
 
             nn.LeakyReLU(0.3),
-
-            ResidualBlock(32),
 
             # 8x32 -> 4x16
             nn.MaxPool2d(2),
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(
+                in_channels=8,
+                out_channels=16,
+                kernel_size=3,
+                padding=1
+            ),
 
-            nn.BatchNorm2d(64),
+            nn.BatchNorm2d(16),
 
-            nn.LeakyReLU(0.3),
-
-            ResidualBlock(64)
+            nn.LeakyReLU(0.3)
         )
 
         # ====================================================
@@ -157,15 +173,15 @@ class ResidualCsiAutoencoder(nn.Module):
 
         self.flatten = nn.Flatten()
 
-        # 64 × 4 × 16 = 4096
+        # 16 × 4 × 16 = 1024
 
         # ====================================================
         # BOTTLENECK
         # ====================================================
 
-        self.encoder_fc = nn.Linear(4096, 512)
+        self.encoder_fc = nn.Linear(1024, 256)
 
-        self.decoder_fc = nn.Linear(512, 4096)
+        self.decoder_fc = nn.Linear(256, 1024)
 
         # ====================================================
         # DECODER
@@ -173,37 +189,33 @@ class ResidualCsiAutoencoder(nn.Module):
 
         self.decoder = nn.Sequential(
 
-            ResidualBlock(64),
-
             nn.ConvTranspose2d(
-                64,
-                32,
+                in_channels=16,
+                out_channels=8,
                 kernel_size=2,
                 stride=2
             ),
 
-            nn.BatchNorm2d(32),
+            nn.BatchNorm2d(8),
 
             nn.LeakyReLU(0.3),
 
-            ResidualBlock(32),
-
             nn.ConvTranspose2d(
-                32,
-                16,
+                in_channels=8,
+                out_channels=4,
                 kernel_size=2,
                 stride=2
             ),
 
-            nn.BatchNorm2d(16),
+            nn.BatchNorm2d(4),
 
             nn.LeakyReLU(0.3),
 
-            ResidualBlock(16),
+            ResidualBlock(4),
 
             nn.Conv2d(
-                16,
-                2,
+                in_channels=4,
+                out_channels=2,
                 kernel_size=3,
                 padding=1
             ),
@@ -224,7 +236,7 @@ class ResidualCsiAutoencoder(nn.Module):
 
         decoded = self.decoder_fc(latent)
 
-        decoded = decoded.view(-1, 64, 4, 16)
+        decoded = decoded.view(-1, 16, 4, 16)
 
         output = self.decoder(decoded)
 
@@ -258,8 +270,9 @@ def train_model():
 
     loader = DataLoader(
         dataset,
-        batch_size=32,
-        shuffle=True
+        batch_size=128,
+        shuffle=True,
+        num_workers=0
     )
 
     model = ResidualCsiAutoencoder().to(device)
@@ -276,12 +289,12 @@ def train_model():
         optimizer,
         mode='min',
         factor=0.5,
-        patience=10
+        patience=5
     )
 
     print("\nStarting training...\n")
 
-    epochs = 300
+    epochs = 50
 
     loss_history = []
 
@@ -358,7 +371,7 @@ def train_model():
 
     plt.savefig("residual_cnn_loss.png")
 
-    plt.show()
+    plt.close()
 
     # ========================================================
     # NMSE PLOT
@@ -377,7 +390,7 @@ def train_model():
 
     plt.savefig("residual_cnn_nmse.png")
 
-    plt.show()
+    plt.close()
 
     print("Training plots saved.")
 
