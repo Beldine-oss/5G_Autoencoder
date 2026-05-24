@@ -5,46 +5,42 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-
 # ============================================================
-# DEVICE CONFIGURATION
+# DEVICE
 # ============================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print("Using device:", device)
 
-
 # ============================================================
-# DATA LOADING AND PREPROCESSING
+# DATA LOADING
 # ============================================================
 def load_dataset():
 
     print("Loading dataset...")
 
     data = sio.loadmat("CSI_dataset.mat")
+
     H = data["H_dataset"]
 
     print("Original shape:", H.shape)
 
-    # --------------------------------------------------------
-    # TRANSPOSE
-    # Original: (16, 64, 10000)
-    # New:      (10000, 16, 64)
-    # --------------------------------------------------------
+    # (16,64,10000) -> (10000,16,64)
     H = H.transpose(2, 0, 1)
 
     print("Transposed shape:", H.shape)
 
     # --------------------------------------------------------
-    # SEPARATE REAL AND IMAGINARY PARTS
+    # REAL + IMAGINARY
     # --------------------------------------------------------
     H_real = np.real(H)
+
     H_imag = np.imag(H)
 
     # --------------------------------------------------------
-    # STACK AS CHANNELS
+    # STACK CHANNELS
     # Shape:
-    # (samples, 2, 16, 64)
+    # (10000,2,16,64)
     # --------------------------------------------------------
     X = np.stack([H_real, H_imag], axis=1)
 
@@ -63,79 +59,151 @@ def load_dataset():
 
 
 # ============================================================
-# CONVOLUTIONAL CSI AUTOENCODER
+# RESIDUAL BLOCK
 # ============================================================
-class ConvolutionalCsiAutoencoder(nn.Module):
+class ResidualBlock(nn.Module):
+
+    def __init__(self, channels):
+
+        super(ResidualBlock, self).__init__()
+
+        self.block = nn.Sequential(
+
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1
+            ),
+
+            nn.BatchNorm2d(channels),
+
+            nn.LeakyReLU(0.3),
+
+            nn.Conv2d(
+                channels,
+                channels,
+                kernel_size=3,
+                padding=1
+            ),
+
+            nn.BatchNorm2d(channels)
+        )
+
+        self.activation = nn.LeakyReLU(0.3)
+
+    def forward(self, x):
+
+        residual = x
+
+        out = self.block(x)
+
+        out = out + residual
+
+        out = self.activation(out)
+
+        return out
+
+
+# ============================================================
+# RESIDUAL CNN AUTOENCODER
+# ============================================================
+class ResidualCsiAutoencoder(nn.Module):
 
     def __init__(self):
 
-        super(ConvolutionalCsiAutoencoder, self).__init__()
+        super(ResidualCsiAutoencoder, self).__init__()
 
         # ====================================================
         # ENCODER
         # ====================================================
-        self.encoder_conv = nn.Sequential(
 
-            nn.Conv2d(
-                in_channels=2,
-                out_channels=8,
-                kernel_size=3,
-                padding=1
-            ),
+        self.encoder = nn.Sequential(
 
-            nn.BatchNorm2d(8),
+            nn.Conv2d(2, 16, kernel_size=3, padding=1),
+
+            nn.BatchNorm2d(16),
 
             nn.LeakyReLU(0.3),
 
-            nn.Conv2d(
-                in_channels=8,
-                out_channels=4,
-                kernel_size=3,
-                padding=1
-            ),
+            ResidualBlock(16),
 
-            nn.BatchNorm2d(4),
+            # 16x64 -> 8x32
+            nn.MaxPool2d(2),
 
-            nn.LeakyReLU(0.3)
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+
+            nn.BatchNorm2d(32),
+
+            nn.LeakyReLU(0.3),
+
+            ResidualBlock(32),
+
+            # 8x32 -> 4x16
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+
+            nn.BatchNorm2d(64),
+
+            nn.LeakyReLU(0.3),
+
+            ResidualBlock(64)
         )
 
         # ====================================================
-        # FLATTEN + BOTTLENECK
+        # FLATTEN
         # ====================================================
-
-        # 4 × 16 × 64 = 4096
 
         self.flatten = nn.Flatten()
 
-        # ----------------------------------------------------
-        # 512 latent neurons = 8x compression
-        # ----------------------------------------------------
-        self.encoder_fc = nn.Linear(4096, 512)
+        # 64 × 4 × 16 = 4096
 
         # ====================================================
-        # DECODER FC
+        # BOTTLENECK
         # ====================================================
+
+        self.encoder_fc = nn.Linear(4096, 512)
+
         self.decoder_fc = nn.Linear(512, 4096)
 
         # ====================================================
-        # DECODER CONV
+        # DECODER
         # ====================================================
-        self.decoder_conv = nn.Sequential(
+
+        self.decoder = nn.Sequential(
+
+            ResidualBlock(64),
 
             nn.ConvTranspose2d(
-                in_channels=4,
-                out_channels=8,
-                kernel_size=3,
-                padding=1
+                64,
+                32,
+                kernel_size=2,
+                stride=2
             ),
 
-            nn.BatchNorm2d(8),
+            nn.BatchNorm2d(32),
 
             nn.LeakyReLU(0.3),
 
+            ResidualBlock(32),
+
             nn.ConvTranspose2d(
-                in_channels=8,
-                out_channels=2,
+                32,
+                16,
+                kernel_size=2,
+                stride=2
+            ),
+
+            nn.BatchNorm2d(16),
+
+            nn.LeakyReLU(0.3),
+
+            ResidualBlock(16),
+
+            nn.Conv2d(
+                16,
+                2,
                 kernel_size=3,
                 padding=1
             ),
@@ -148,25 +216,19 @@ class ConvolutionalCsiAutoencoder(nn.Module):
     # ========================================================
     def forward(self, x):
 
-        # ----------------------------------------------------
-        # ENCODER
-        # ----------------------------------------------------
-        x = self.encoder_conv(x)
+        encoded = self.encoder(x)
 
-        x = self.flatten(x)
+        latent_input = self.flatten(encoded)
 
-        latent = self.encoder_fc(x)
+        latent = self.encoder_fc(latent_input)
 
-        # ----------------------------------------------------
-        # DECODER
-        # ----------------------------------------------------
-        x = self.decoder_fc(latent)
+        decoded = self.decoder_fc(latent)
 
-        x = x.view(-1, 4, 16, 64)
+        decoded = decoded.view(-1, 64, 4, 16)
 
-        x = self.decoder_conv(x)
+        output = self.decoder(decoded)
 
-        return x
+        return output
 
 
 # ============================================================
@@ -188,9 +250,6 @@ def calculate_nmse(actual, predicted):
 # ============================================================
 def train_model():
 
-    # --------------------------------------------------------
-    # LOAD DATA
-    # --------------------------------------------------------
     X = load_dataset()
 
     X_tensor = torch.tensor(X)
@@ -199,32 +258,20 @@ def train_model():
 
     loader = DataLoader(
         dataset,
-        batch_size=64,
+        batch_size=32,
         shuffle=True
     )
 
-    # --------------------------------------------------------
-    # MODEL
-    # --------------------------------------------------------
-    model = ConvolutionalCsiAutoencoder().to(device)
+    model = ResidualCsiAutoencoder().to(device)
 
-    # --------------------------------------------------------
-    # LOSS FUNCTION
-    # --------------------------------------------------------
     criterion = nn.MSELoss()
 
-    # --------------------------------------------------------
-    # OPTIMIZER
-    # --------------------------------------------------------
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=1e-4,
         weight_decay=1e-6
     )
 
-    # --------------------------------------------------------
-    # LEARNING RATE SCHEDULER
-    # --------------------------------------------------------
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
@@ -232,12 +279,9 @@ def train_model():
         patience=10
     )
 
-    # --------------------------------------------------------
-    # TRAINING LOOP
-    # --------------------------------------------------------
     print("\nStarting training...\n")
 
-    epochs = 200
+    epochs = 300
 
     loss_history = []
 
@@ -255,21 +299,12 @@ def train_model():
 
             batch_x = batch_x.to(device)
 
-            # ------------------------------------------------
-            # FORWARD
-            # ------------------------------------------------
             output = model(batch_x)
 
-            # ------------------------------------------------
-            # LOSS
-            # ------------------------------------------------
             loss = criterion(output, batch_x)
 
             nmse = calculate_nmse(batch_x, output)
 
-            # ------------------------------------------------
-            # BACKPROP
-            # ------------------------------------------------
             optimizer.zero_grad()
 
             loss.backward()
@@ -280,25 +315,16 @@ def train_model():
 
             total_nmse += nmse.item()
 
-        # ----------------------------------------------------
-        # AVERAGES
-        # ----------------------------------------------------
         avg_loss = total_loss / len(loader)
 
         avg_nmse = total_nmse / len(loader)
+
+        scheduler.step(avg_loss)
 
         loss_history.append(avg_loss)
 
         nmse_history.append(avg_nmse)
 
-        # ----------------------------------------------------
-        # UPDATE LR
-        # ----------------------------------------------------
-        scheduler.step(avg_loss)
-
-        # ----------------------------------------------------
-        # PRINT METRICS
-        # ----------------------------------------------------
         print(
             f"Epoch {epoch+1}/{epochs} | "
             f"Loss: {avg_loss:.6f} | "
@@ -310,39 +336,38 @@ def train_model():
     # ========================================================
     torch.save(
         model.state_dict(),
-        "cnn_autoencoder_model.pth"
+        "residual_cnn_autoencoder.pth"
     )
 
-    print("\nTraining complete.")
-    print("Model saved as cnn_autoencoder_model.pth")
+    print("\nModel saved.")
 
     # ========================================================
-    # PLOT TRAINING LOSS
+    # LOSS PLOT
     # ========================================================
     plt.figure(figsize=(10, 5))
 
     plt.plot(loss_history)
 
-    plt.title("CNN Autoencoder Training Loss")
+    plt.title("Residual CNN Training Loss")
 
     plt.xlabel("Epoch")
 
-    plt.ylabel("MSE Loss")
+    plt.ylabel("Loss")
 
     plt.grid(True)
 
-    plt.savefig("cnn_training_loss.png")
+    plt.savefig("residual_cnn_loss.png")
 
     plt.show()
 
     # ========================================================
-    # PLOT NMSE
+    # NMSE PLOT
     # ========================================================
     plt.figure(figsize=(10, 5))
 
     plt.plot(nmse_history)
 
-    plt.title("CNN Autoencoder NMSE")
+    plt.title("Residual CNN NMSE")
 
     plt.xlabel("Epoch")
 
@@ -350,7 +375,7 @@ def train_model():
 
     plt.grid(True)
 
-    plt.savefig("cnn_nmse_curve.png")
+    plt.savefig("residual_cnn_nmse.png")
 
     plt.show()
 
@@ -358,7 +383,7 @@ def train_model():
 
 
 # ============================================================
-# MAIN ENTRY
+# MAIN
 # ============================================================
 if __name__ == "__main__":
 
