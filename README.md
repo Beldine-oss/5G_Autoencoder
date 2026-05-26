@@ -31,6 +31,5 @@ This project implements an AI-based CSI compression framework using an Autoencod
 ## Key Features
 
 - **CSI Compression**: Autoencoder reduces feedback from ~16K to 64 dimensions (256x compression)
-- **Hybrid Beamforming**: AI-designed beamformers using only 8 RF chains for 32 antennas
 - **Spectral Efficiency**: Maintains high data rates with reduced hardware complexity
 - **PyTorch Implementation**: GPU-accelerated training and inference
