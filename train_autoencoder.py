@@ -17,21 +17,23 @@ MAT_KEY = "H_dataset"
 
 SEED = 42
 BATCH_SIZE = 128
-EPOCHS = 50
-LEARNING_RATE = 1e-4
-WEIGHT_DECAY = 1e-6
+EPOCHS = 300
+LEARNING_RATE = 1e-3
+WEIGHT_DECAY = 0.0
 GRAD_CLIP_NORM = 1.0
 
-# First experiment: no compression sanity test.
-# Input size = 2 * 16 * 64 = 2048.
-# LATENT_DIM = 2048 means CR = 1x.
 LATENT_DIM = 2048
 
-MODEL_PATH = f"cnn_autoencoder_model_latent{LATENT_DIM}.pth"
-STATS_PATH = f"preprocessing_stats_latent{LATENT_DIM}.npz"
+MODEL_PATH = f"debug_autoencoder_model_latent{LATENT_DIM}.pth"
+STATS_PATH = f"debug_preprocessing_stats_latent{LATENT_DIM}.npz"
 
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
+
+DEBUG_TINY_OVERFIT = True
+DEBUG_NUM_SAMPLES = 200
+
+USE_ANGULAR_DOMAIN = False
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -61,8 +63,6 @@ def load_raw_csi():
 
     print("Original shape:", H.shape)
 
-    # Original expected shape: (16, 64, samples)
-    # New shape: (samples, 16, 64)
     H = H.transpose(2, 0, 1)
 
     print("Transposed shape:", H.shape)
@@ -71,12 +71,7 @@ def load_raw_csi():
 
 
 def angular_domain_transform(H):
-    """
-    Converts spatial-frequency CSI into angular-delay-like domain.
-    Orthonormal FFT keeps energy scaling stable for NMSE.
-    """
-    H_ad = np.fft.fft2(H, axes=(1, 2), norm="ortho")
-    return H_ad
+    return np.fft.fft2(H, axes=(1, 2), norm="ortho")
 
 
 def complex_to_channels(H_complex):
@@ -91,11 +86,16 @@ def complex_to_channels(H_complex):
 def prepare_datasets():
     H = load_raw_csi()
 
-    H_ad = angular_domain_transform(H)
+    if USE_ANGULAR_DOMAIN:
+        print("Using angular-domain CSI.")
+        H_processed = angular_domain_transform(H)
+    else:
+        print("Using raw CSI.")
+        H_processed = H
 
-    X = complex_to_channels(H_ad)
+    X = complex_to_channels(H_processed)
 
-    print("CNN input shape:", X.shape)
+    print("Input tensor shape:", X.shape)
 
     num_samples = X.shape[0]
     indices = np.random.permutation(num_samples)
@@ -111,12 +111,19 @@ def prepare_datasets():
     X_val = X[val_idx]
     X_test = X[test_idx]
 
-    # Train-only normalization prevents validation/test leakage.
     x_max = np.max(np.abs(X_train)) + 1e-12
 
     X_train = X_train / x_max
     X_val = X_val / x_max
     X_test = X_test / x_max
+
+    if DEBUG_TINY_OVERFIT:
+        print("DEBUG_TINY_OVERFIT is enabled.")
+        X_train = X_train[:DEBUG_NUM_SAMPLES]
+        X_val = X_train.copy()
+
+        train_idx = train_idx[:DEBUG_NUM_SAMPLES]
+        val_idx = train_idx.copy()
 
     np.savez(
         STATS_PATH,
@@ -125,9 +132,8 @@ def prepare_datasets():
         val_idx=val_idx,
         test_idx=test_idx,
         latent_dim=LATENT_DIM,
-        input_channels=2,
-        height=X.shape[2],
-        width=X.shape[3],
+        use_angular_domain=USE_ANGULAR_DOMAIN,
+        debug_tiny_overfit=DEBUG_TINY_OVERFIT,
     )
 
     print("Normalization complete.")
@@ -136,30 +142,12 @@ def prepare_datasets():
     print(f"Test samples : {len(X_test)}")
     print(f"Saved preprocessing stats to {STATS_PATH}")
 
-    return X_train.astype(np.float32), X_val.astype(np.float32), X_test.astype(np.float32)
+    return X_train.astype(np.float32), X_val.astype(np.float32)
 
 
 # ============================================================
 # MODEL
 # ============================================================
-
-class ResidualBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-
-        self.block = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(channels),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(channels),
-        )
-
-        self.activation = nn.LeakyReLU(0.2, inplace=True)
-
-    def forward(self, x):
-        return self.activation(x + self.block(x))
-
 
 class CNNAutoencoder(nn.Module):
     def __init__(self, latent_dim=LATENT_DIM):
@@ -167,59 +155,23 @@ class CNNAutoencoder(nn.Module):
 
         self.latent_dim = latent_dim
 
-        self.encoder_conv = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16),
+        self.encoder = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(2048, 2048),
             nn.LeakyReLU(0.2, inplace=True),
-
-            ResidualBlock(16),
-
-            nn.Conv2d(16, 8, kernel_size=3, padding=1),
-            nn.BatchNorm2d(8),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            ResidualBlock(8),
-
-            nn.Conv2d(8, 4, kernel_size=3, padding=1),
-            nn.BatchNorm2d(4),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(2048, latent_dim),
         )
 
-        self.flatten = nn.Flatten()
-
-        # 4 * 16 * 64 = 4096
-        # Linear bottleneck: no activation here.
-        self.encoder_fc = nn.Linear(4096, latent_dim)
-
-        self.decoder_fc = nn.Linear(latent_dim, 4096)
-
-        self.decoder_conv = nn.Sequential(
-            nn.Conv2d(4, 8, kernel_size=3, padding=1),
-            nn.BatchNorm2d(8),
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 2048),
             nn.LeakyReLU(0.2, inplace=True),
-
-            ResidualBlock(8),
-
-            nn.Conv2d(8, 16, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            ResidualBlock(16),
-
-            # Linear output: no Tanh.
-            nn.Conv2d(16, 2, kernel_size=3, padding=1),
+            nn.Linear(2048, 2048),
         )
 
     def forward(self, x):
-        x = self.encoder_conv(x)
-        x = self.flatten(x)
-
-        latent = self.encoder_fc(x)
-
-        x = self.decoder_fc(latent)
-        x = x.view(-1, 4, 16, 64)
-
-        reconstruction = self.decoder_conv(x)
+        latent = self.encoder(x)
+        reconstruction = self.decoder(latent)
+        reconstruction = reconstruction.view(-1, 2, 16, 64)
 
         return reconstruction
 
@@ -272,7 +224,7 @@ def train_model():
 
     print("Using device:", device)
 
-    X_train, X_val, _ = prepare_datasets()
+    X_train, X_val = prepare_datasets()
 
     train_tensor = torch.tensor(X_train)
     val_tensor = torch.tensor(X_val)
@@ -311,7 +263,7 @@ def train_model():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=10,
+        patience=30,
     )
 
     use_amp = torch.cuda.is_available()
@@ -397,6 +349,8 @@ def train_model():
                     "latent_dim": LATENT_DIM,
                     "best_val_nmse": best_val_nmse,
                     "epoch": epoch + 1,
+                    "use_angular_domain": USE_ANGULAR_DOMAIN,
+                    "debug_tiny_overfit": DEBUG_TINY_OVERFIT,
                 },
                 MODEL_PATH,
             )
@@ -407,25 +361,25 @@ def train_model():
     plt.figure(figsize=(10, 5))
     plt.plot(train_loss_history, label="Train")
     plt.plot(val_loss_history, label="Validation")
-    plt.title("CNN Autoencoder Loss")
+    plt.title("Debug Autoencoder Loss")
     plt.xlabel("Epoch")
     plt.ylabel("MSE Loss")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"cnn_training_loss_latent{LATENT_DIM}.png")
+    plt.savefig(f"debug_training_loss_latent{LATENT_DIM}.png")
     plt.close()
 
     plt.figure(figsize=(10, 5))
     plt.plot(train_nmse_db_history, label="Train")
     plt.plot(val_nmse_db_history, label="Validation")
-    plt.title("CNN Autoencoder NMSE")
+    plt.title("Debug Autoencoder NMSE")
     plt.xlabel("Epoch")
     plt.ylabel("NMSE dB")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"cnn_nmse_curve_latent{LATENT_DIM}.png")
+    plt.savefig(f"debug_nmse_curve_latent{LATENT_DIM}.png")
     plt.close()
 
     print("Training plots saved.")

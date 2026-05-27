@@ -32,9 +32,7 @@ def load_model():
     latent_dim = int(checkpoint["latent_dim"])
 
     model = CNNAutoencoder(latent_dim=latent_dim).to(device)
-
     model.load_state_dict(checkpoint["model_state_dict"])
-
     model.eval()
 
     print(f"Loaded model: {MODEL_PATH}")
@@ -53,25 +51,37 @@ def load_test_dataset():
     x_max = float(stats["x_max"])
     test_idx = stats["test_idx"]
 
+    use_angular_domain = bool(stats["use_angular_domain"])
+    debug_tiny_overfit = bool(stats["debug_tiny_overfit"])
+
     data = sio.loadmat(DATASET_PATH)
     H = data[MAT_KEY]
 
     print("Original dataset shape:", H.shape)
 
-    # Original expected shape: (16, 64, samples)
-    # New shape: (samples, 16, 64)
     H = H.transpose(2, 0, 1)
 
-    H_ad = angular_domain_transform(H)
+    if use_angular_domain:
+        print("Evaluation using angular-domain CSI.")
+        H_processed = angular_domain_transform(H)
+    else:
+        print("Evaluation using raw CSI.")
+        H_processed = H
 
-    X = complex_to_channels(H_ad)
+    X = complex_to_channels(H_processed)
 
     X = X / x_max
 
-    X_test = X[test_idx]
+    if debug_tiny_overfit:
+        print("DEBUG_TINY_OVERFIT was enabled during training.")
+        # For tiny overfit debugging, evaluate the same samples used for training.
+        train_idx = stats["train_idx"]
+        X_test = X[train_idx]
+    else:
+        X_test = X[test_idx]
 
     print(f"Loaded stats: {STATS_PATH}")
-    print("Test input shape:", X_test.shape)
+    print("Evaluation input shape:", X_test.shape)
 
     return X_test.astype(np.float32)
 
@@ -81,7 +91,7 @@ def load_test_dataset():
 # ============================================================
 
 def evaluate(model, latent_dim):
-    print("\nEvaluating CSI compression performance")
+    print("\nEvaluating CSI reconstruction performance")
     print("Using device:", device)
 
     X_test = load_test_dataset()
@@ -106,9 +116,9 @@ def evaluate(model, latent_dim):
     compression_ratio = input_dim / latent_dim
 
     print("\n============================================================")
-    print("FINAL TEST SUMMARY")
+    print("FINAL EVALUATION SUMMARY")
     print("============================================================")
-    print(f"Test samples       : {X_test.shape[0]}")
+    print(f"Samples            : {X_test.shape[0]}")
     print(f"MSE                : {mse:.6e}")
     print(f"Power              : {power:.6e}")
     print(f"NMSE               : {nmse:.6f}")
@@ -131,7 +141,7 @@ def evaluate(model, latent_dim):
 # VISUALIZATION
 # ============================================================
 
-def visualize(X_test, reconstructed, sample_index=0):
+def visualize(X_test, reconstructed, latent_dim, sample_index=0):
     print("\nVisualizing CSI reconstruction")
 
     sample_original = X_test[sample_index]
@@ -153,7 +163,7 @@ def visualize(X_test, reconstructed, sample_index=0):
 
     plt.subplot(1, 3, 1)
     plt.imshow(original_mag, aspect="auto")
-    plt.title("Original Angular-Domain CSI Magnitude")
+    plt.title("Original CSI Magnitude")
     plt.colorbar()
 
     plt.subplot(1, 3, 2)
@@ -167,10 +177,10 @@ def visualize(X_test, reconstructed, sample_index=0):
     plt.colorbar()
 
     plt.tight_layout()
-    plt.savefig(f"csi_reconstruction_latent{latent_dim}.png")
+    plt.savefig(f"debug_csi_reconstruction_latent{latent_dim}.png")
     plt.close()
 
-    print(f"Saved: csi_reconstruction_latent{latent_dim}.png")
+    print(f"Saved: debug_csi_reconstruction_latent{latent_dim}.png")
 
 
 # ============================================================
@@ -182,7 +192,7 @@ def main():
 
     X_test, reconstructed = evaluate(model, latent_dim)
 
-    visualize(X_test, reconstructed, sample_index=0)
+    visualize(X_test, reconstructed, latent_dim, sample_index=0)
 
 
 if __name__ == "__main__":
