@@ -17,23 +17,21 @@ MAT_KEY = "H_dataset"
 
 SEED = 42
 BATCH_SIZE = 128
-EPOCHS = 300
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 0.0
+EPOCHS = 150
+LEARNING_RATE = 3e-4
+WEIGHT_DECAY = 1e-7
 GRAD_CLIP_NORM = 1.0
 
 LATENT_DIM = 2048
 
-MODEL_PATH = f"debug_autoencoder_model_latent{LATENT_DIM}.pth"
-STATS_PATH = f"debug_preprocessing_stats_latent{LATENT_DIM}.npz"
+MODEL_PATH = f"rescnn_autoencoder_model_latent{LATENT_DIM}.pth"
+STATS_PATH = f"rescnn_preprocessing_stats_latent{LATENT_DIM}.npz"
 
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
 
-DEBUG_TINY_OVERFIT = True
-DEBUG_NUM_SAMPLES = 200
-
 USE_ANGULAR_DOMAIN = False
+DEBUG_TINY_OVERFIT = False
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -63,6 +61,8 @@ def load_raw_csi():
 
     print("Original shape:", H.shape)
 
+    # Original expected shape: (16, 64, samples)
+    # New shape: (samples, 16, 64)
     H = H.transpose(2, 0, 1)
 
     print("Transposed shape:", H.shape)
@@ -117,14 +117,6 @@ def prepare_datasets():
     X_val = X_val / x_max
     X_test = X_test / x_max
 
-    if DEBUG_TINY_OVERFIT:
-        print("DEBUG_TINY_OVERFIT is enabled.")
-        X_train = X_train[:DEBUG_NUM_SAMPLES]
-        X_val = X_train.copy()
-
-        train_idx = train_idx[:DEBUG_NUM_SAMPLES]
-        val_idx = train_idx.copy()
-
     np.savez(
         STATS_PATH,
         x_max=x_max,
@@ -149,29 +141,80 @@ def prepare_datasets():
 # MODEL
 # ============================================================
 
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+        )
+
+        self.activation = nn.LeakyReLU(0.1, inplace=True)
+
+    def forward(self, x):
+        return self.activation(x + self.block(x))
+
+
 class CNNAutoencoder(nn.Module):
     def __init__(self, latent_dim=LATENT_DIM):
         super().__init__()
 
         self.latent_dim = latent_dim
 
-        self.encoder = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(2048, 2048),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(2048, latent_dim),
+        self.encoder_conv = nn.Sequential(
+            nn.Conv2d(2, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            ResidualBlock(16),
+
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            ResidualBlock(32),
+
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            ResidualBlock(16),
+
+            nn.Conv2d(16, 4, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
         )
 
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 2048),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(2048, 2048),
+        self.flatten = nn.Flatten()
+
+        # 4 * 16 * 64 = 4096
+        # Linear bottleneck: no activation here.
+        self.encoder_fc = nn.Linear(4 * 16 * 64, latent_dim)
+
+        self.decoder_fc = nn.Linear(latent_dim, 4 * 16 * 64)
+
+        self.decoder_conv = nn.Sequential(
+            nn.Conv2d(4, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            ResidualBlock(16),
+
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            ResidualBlock(32),
+
+            nn.Conv2d(32, 16, kernel_size=3, padding=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            ResidualBlock(16),
+
+            # Linear output: no Tanh.
+            nn.Conv2d(16, 2, kernel_size=3, padding=1),
         )
 
     def forward(self, x):
-        latent = self.encoder(x)
-        reconstruction = self.decoder(latent)
-        reconstruction = reconstruction.view(-1, 2, 16, 64)
+        x = self.encoder_conv(x)
+        x = self.flatten(x)
+
+        latent = self.encoder_fc(x)
+
+        x = self.decoder_fc(latent)
+        x = x.view(-1, 4, 16, 64)
+
+        reconstruction = self.decoder_conv(x)
 
         return reconstruction
 
@@ -251,9 +294,9 @@ def train_model():
 
     model = CNNAutoencoder(latent_dim=LATENT_DIM).to(device)
 
-    criterion = nn.MSELoss()
+    criterion = nn.SmoothL1Loss(beta=0.02)
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
         weight_decay=WEIGHT_DECAY,
@@ -263,7 +306,7 @@ def train_model():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=30,
+        patience=15,
     )
 
     use_amp = torch.cuda.is_available()
@@ -361,25 +404,25 @@ def train_model():
     plt.figure(figsize=(10, 5))
     plt.plot(train_loss_history, label="Train")
     plt.plot(val_loss_history, label="Validation")
-    plt.title("Debug Autoencoder Loss")
+    plt.title("Residual CNN Autoencoder Loss")
     plt.xlabel("Epoch")
-    plt.ylabel("MSE Loss")
+    plt.ylabel("Smooth L1 Loss")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"debug_training_loss_latent{LATENT_DIM}.png")
+    plt.savefig(f"rescnn_training_loss_latent{LATENT_DIM}.png")
     plt.close()
 
     plt.figure(figsize=(10, 5))
     plt.plot(train_nmse_db_history, label="Train")
     plt.plot(val_nmse_db_history, label="Validation")
-    plt.title("Debug Autoencoder NMSE")
+    plt.title("Residual CNN Autoencoder NMSE")
     plt.xlabel("Epoch")
     plt.ylabel("NMSE dB")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"debug_nmse_curve_latent{LATENT_DIM}.png")
+    plt.savefig(f"rescnn_nmse_curve_latent{LATENT_DIM}.png")
     plt.close()
 
     print("Training plots saved.")
