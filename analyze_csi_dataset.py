@@ -3,7 +3,7 @@ import scipy.io as sio
 import matplotlib.pyplot as plt
 
 
-DATASET_PATH = "CSI_dataset.mat"
+DATASET_PATH = "CSI_dataset_mmwave.mat"
 MAT_KEY = "H_dataset"
 
 TOP_K_VALUES = [64, 128, 256, 512, 1024]

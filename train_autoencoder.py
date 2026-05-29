@@ -2,71 +2,48 @@ import random
 import numpy as np
 import scipy.io as sio
 import matplotlib.pyplot as plt
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
-DATASET_PATH = "CSI_dataset.mat"
+DATASET_PATH = "CSI_dataset_mmwave.mat"
 MAT_KEY = "H_dataset"
 
 SEED = 42
 BATCH_SIZE = 128
-EPOCHS = 150
+EPOCHS = 80
 LEARNING_RATE = 3e-4
 WEIGHT_DECAY = 1e-7
 GRAD_CLIP_NORM = 1.0
 
+# First run 2048. After it works, try 512 then 256.
 LATENT_DIM = 2048
 
-MODEL_PATH = f"rescnn_autoencoder_model_latent{LATENT_DIM}.pth"
-STATS_PATH = f"rescnn_preprocessing_stats_latent{LATENT_DIM}.npz"
+MODEL_PATH = f"mmwave_rescnn_rms_latent{LATENT_DIM}.pth"
+STATS_PATH = f"mmwave_rescnn_rms_stats_latent{LATENT_DIM}.npz"
 
 TRAIN_RATIO = 0.8
 VAL_RATIO = 0.1
-
-USE_ANGULAR_DOMAIN = False
-DEBUG_TINY_OVERFIT = False
+USE_ANGULAR_DOMAIN = True
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-# ============================================================
-# REPRODUCIBILITY
-# ============================================================
 
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-# ============================================================
-# DATA PREPROCESSING
-# ============================================================
-
 def load_raw_csi():
-    print("Loading dataset...")
-
     data = sio.loadmat(DATASET_PATH)
     H = data[MAT_KEY]
-
     print("Original shape:", H.shape)
-
-    # Original expected shape: (16, 64, samples)
-    # New shape: (samples, 16, 64)
     H = H.transpose(2, 0, 1)
-
     print("Transposed shape:", H.shape)
-
     return H
 
 
@@ -75,12 +52,10 @@ def angular_domain_transform(H):
 
 
 def complex_to_channels(H_complex):
-    H_real = np.real(H_complex)
-    H_imag = np.imag(H_complex)
-
-    X = np.stack([H_real, H_imag], axis=1)
-
-    return X.astype(np.float32)
+    return np.stack(
+        [np.real(H_complex), np.imag(H_complex)],
+        axis=1,
+    ).astype(np.float32)
 
 
 def prepare_datasets():
@@ -88,13 +63,11 @@ def prepare_datasets():
 
     if USE_ANGULAR_DOMAIN:
         print("Using angular-domain CSI.")
-        H_processed = angular_domain_transform(H)
+        H = angular_domain_transform(H)
     else:
         print("Using raw CSI.")
-        H_processed = H
 
-    X = complex_to_channels(H_processed)
-
+    X = complex_to_channels(H)
     print("Input tensor shape:", X.shape)
 
     num_samples = X.shape[0]
@@ -111,35 +84,31 @@ def prepare_datasets():
     X_val = X[val_idx]
     X_test = X[test_idx]
 
-    x_max = np.max(np.abs(X_train)) + 1e-12
+    # RMS normalization prevents sparse angular-domain values from collapsing.
+    x_scale = np.sqrt(np.mean(X_train ** 2)) + 1e-12
 
-    X_train = X_train / x_max
-    X_val = X_val / x_max
-    X_test = X_test / x_max
+    X_train = X_train / x_scale
+    X_val = X_val / x_scale
+    X_test = X_test / x_scale
 
     np.savez(
         STATS_PATH,
-        x_max=x_max,
+        x_scale=x_scale,
         train_idx=train_idx,
         val_idx=val_idx,
         test_idx=test_idx,
         latent_dim=LATENT_DIM,
         use_angular_domain=USE_ANGULAR_DOMAIN,
-        debug_tiny_overfit=DEBUG_TINY_OVERFIT,
     )
 
-    print("Normalization complete.")
-    print(f"Train samples: {len(X_train)}")
-    print(f"Val samples  : {len(X_val)}")
-    print(f"Test samples : {len(X_test)}")
-    print(f"Saved preprocessing stats to {STATS_PATH}")
+    print("RMS normalization complete.")
+    print(f"RMS scale     : {x_scale:.6e}")
+    print(f"Train samples : {len(X_train)}")
+    print(f"Val samples   : {len(X_val)}")
+    print(f"Test samples  : {len(X_test)}")
 
     return X_train.astype(np.float32), X_val.astype(np.float32)
 
-
-# ============================================================
-# MODEL
-# ============================================================
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
@@ -161,8 +130,6 @@ class CNNAutoencoder(nn.Module):
     def __init__(self, latent_dim=LATENT_DIM):
         super().__init__()
 
-        self.latent_dim = latent_dim
-
         self.encoder_conv = nn.Sequential(
             nn.Conv2d(2, 16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.1, inplace=True),
@@ -181,11 +148,7 @@ class CNNAutoencoder(nn.Module):
         )
 
         self.flatten = nn.Flatten()
-
-        # 4 * 16 * 64 = 4096
-        # Linear bottleneck: no activation here.
         self.encoder_fc = nn.Linear(4 * 16 * 64, latent_dim)
-
         self.decoder_fc = nn.Linear(latent_dim, 4 * 16 * 64)
 
         self.decoder_conv = nn.Sequential(
@@ -201,32 +164,21 @@ class CNNAutoencoder(nn.Module):
             nn.LeakyReLU(0.1, inplace=True),
             ResidualBlock(16),
 
-            # Linear output: no Tanh.
             nn.Conv2d(16, 2, kernel_size=3, padding=1),
         )
 
     def forward(self, x):
         x = self.encoder_conv(x)
         x = self.flatten(x)
-
         latent = self.encoder_fc(x)
-
         x = self.decoder_fc(latent)
         x = x.view(-1, 4, 16, 64)
+        return self.decoder_conv(x)
 
-        reconstruction = self.decoder_conv(x)
-
-        return reconstruction
-
-
-# ============================================================
-# METRICS
-# ============================================================
 
 def nmse_from_sums(mse_sum, power_sum):
     nmse = mse_sum / (power_sum + 1e-12)
     nmse_db = 10.0 * np.log10(nmse + 1e-12)
-
     return nmse, nmse_db
 
 
@@ -240,7 +192,7 @@ def evaluate_epoch(model, loader, criterion):
 
     with torch.no_grad():
         for batch_x, _ in loader:
-            batch_x = batch_x.to(device, non_blocking=True)
+            batch_x = batch_x.to(device)
 
             output = model(batch_x)
             loss = criterion(output, batch_x)
@@ -252,49 +204,33 @@ def evaluate_epoch(model, loader, criterion):
             total_power_sum += torch.sum(batch_x ** 2).item()
             total_samples += batch_size
 
-    avg_loss = total_loss / total_samples
+    loss = total_loss / total_samples
     nmse, nmse_db = nmse_from_sums(total_mse_sum, total_power_sum)
 
-    return avg_loss, nmse, nmse_db
+    return loss, nmse, nmse_db
 
-
-# ============================================================
-# TRAINING
-# ============================================================
 
 def train_model():
     set_seed(SEED)
-
     print("Using device:", device)
 
     X_train, X_val = prepare_datasets()
 
-    train_tensor = torch.tensor(X_train)
-    val_tensor = torch.tensor(X_val)
-
-    num_workers = 2 if torch.cuda.is_available() else 0
-
     train_loader = DataLoader(
-        TensorDataset(train_tensor, train_tensor),
+        TensorDataset(torch.tensor(X_train), torch.tensor(X_train)),
         batch_size=BATCH_SIZE,
         shuffle=True,
-        drop_last=False,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
     )
 
     val_loader = DataLoader(
-        TensorDataset(val_tensor, val_tensor),
+        TensorDataset(torch.tensor(X_val), torch.tensor(X_val)),
         batch_size=BATCH_SIZE,
         shuffle=False,
-        drop_last=False,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
     )
 
     model = CNNAutoencoder(latent_dim=LATENT_DIM).to(device)
 
-    criterion = nn.SmoothL1Loss(beta=0.02)
+    criterion = nn.MSELoss()
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -306,18 +242,13 @@ def train_model():
         optimizer,
         mode="min",
         factor=0.5,
-        patience=15,
+        patience=10,
     )
-
-    use_amp = torch.cuda.is_available()
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     best_val_nmse = float("inf")
 
-    train_loss_history = []
-    val_loss_history = []
-    train_nmse_db_history = []
-    val_nmse_db_history = []
+    train_nmse_history = []
+    val_nmse_history = []
 
     print("\nStarting training...\n")
 
@@ -330,24 +261,20 @@ def train_model():
         total_samples = 0
 
         for batch_x, _ in train_loader:
-            batch_x = batch_x.to(device, non_blocking=True)
+            batch_x = batch_x.to(device)
+
+            output = model(batch_x)
+            loss = criterion(output, batch_x)
 
             optimizer.zero_grad()
-
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                output = model(batch_x)
-                loss = criterion(output, batch_x)
-
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+            loss.backward()
 
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 max_norm=GRAD_CLIP_NORM,
             )
 
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
             batch_size = batch_x.size(0)
 
@@ -367,16 +294,11 @@ def train_model():
 
         scheduler.step(val_loss)
 
-        train_loss_history.append(train_loss)
-        val_loss_history.append(val_loss)
-        train_nmse_db_history.append(train_nmse_db)
-        val_nmse_db_history.append(val_nmse_db)
-
-        current_lr = optimizer.param_groups[0]["lr"]
+        train_nmse_history.append(train_nmse_db)
+        val_nmse_history.append(val_nmse_db)
 
         print(
             f"Epoch {epoch + 1:03d}/{EPOCHS} | "
-            f"LR: {current_lr:.2e} | "
             f"Train Loss: {train_loss:.6e} | "
             f"Train NMSE: {train_nmse:.6f} ({train_nmse_db:.2f} dB) | "
             f"Val Loss: {val_loss:.6e} | "
@@ -393,7 +315,6 @@ def train_model():
                     "best_val_nmse": best_val_nmse,
                     "epoch": epoch + 1,
                     "use_angular_domain": USE_ANGULAR_DOMAIN,
-                    "debug_tiny_overfit": DEBUG_TINY_OVERFIT,
                 },
                 MODEL_PATH,
             )
@@ -402,30 +323,16 @@ def train_model():
     print(f"Best model saved as {MODEL_PATH}")
 
     plt.figure(figsize=(10, 5))
-    plt.plot(train_loss_history, label="Train")
-    plt.plot(val_loss_history, label="Validation")
-    plt.title("Residual CNN Autoencoder Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Smooth L1 Loss")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(f"rescnn_training_loss_latent{LATENT_DIM}.png")
-    plt.close()
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_nmse_db_history, label="Train")
-    plt.plot(val_nmse_db_history, label="Validation")
-    plt.title("Residual CNN Autoencoder NMSE")
+    plt.plot(train_nmse_history, label="Train")
+    plt.plot(val_nmse_history, label="Validation")
+    plt.title("mmWave ResCNN NMSE")
     plt.xlabel("Epoch")
     plt.ylabel("NMSE dB")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"rescnn_nmse_curve_latent{LATENT_DIM}.png")
+    plt.savefig(f"mmwave_rescnn_rms_nmse_latent{LATENT_DIM}.png")
     plt.close()
-
-    print("Training plots saved.")
 
 
 if __name__ == "__main__":
