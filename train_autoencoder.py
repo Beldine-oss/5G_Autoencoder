@@ -12,13 +12,12 @@ MAT_KEY = "H_dataset"
 
 SEED = 42
 BATCH_SIZE = 128
-EPOCHS = 80
-LEARNING_RATE = 3e-4
+EPOCHS = 40
+LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-7
 GRAD_CLIP_NORM = 1.0
 
-# First run 2048. After it works, try 512 then 256.
-LATENT_DIM = 2048
+LATENT_DIM = 512
 
 MODEL_PATH = f"mmwave_rescnn_rms_latent{LATENT_DIM}.pth"
 STATS_PATH = f"mmwave_rescnn_rms_stats_latent{LATENT_DIM}.npz"
