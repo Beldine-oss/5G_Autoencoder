@@ -17,7 +17,7 @@ LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-7
 GRAD_CLIP_NORM = 1.0
 
-LATENT_DIM = 256
+LATENT_DIM = 512
 
 MODEL_PATH = f"mmwave_rescnn_rms_latent{LATENT_DIM}.pth"
 STATS_PATH = f"mmwave_rescnn_rms_stats_latent{LATENT_DIM}.npz"
